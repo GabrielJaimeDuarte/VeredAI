@@ -5,6 +5,8 @@ import base64
 from fpdf import FPDF
 import datetime
 import os
+import whisper
+import numpy as np
 
 # ─── Configuración ───────────────────────────────────────────
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -37,10 +39,40 @@ URGENCIA: (LEVE / MODERADO / URGENTE / EMERGENCIA)
 
 Sé breve. El médico está en campo."""
 
-# ─── Función principal de consulta ───────────────────────────
+# ─── Transcripción de voz con Whisper ────────────────────────
+def transcribir_audio(audio):
+    if audio is None:
+        return ""
+    try:
+        sample_rate, data = audio
+
+        # Convertir a float32 mono
+        if data.dtype != np.float32:
+            data = data.astype(np.float32) / np.iinfo(data.dtype).max
+        if len(data.shape) > 1:
+            data = data.mean(axis=1)
+
+        # Guardar WAV temporal
+        tmp_path = os.path.join(os.path.expanduser("~"), "veredai_audio.wav")
+        import scipy.io.wavfile as wav
+        wav.write(tmp_path, sample_rate, data)
+
+        # Transcribir
+        modelo_voz = whisper.load_model("base")
+        resultado = modelo_voz.transcribe(tmp_path, language="es")
+
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+        return resultado["text"].strip()
+    except Exception as e:
+        return f"Error al transcribir: {str(e)}"
+
+# ─── Consulta clínica con streaming ──────────────────────────
 def consultar(sintomas, imagen):
     if not sintomas.strip() and imagen is None:
-        return "⚠️ Por favor describe los síntomas o sube una imagen.", ""
+        yield "⚠️ Por favor describe los síntomas o sube una imagen.", ""
+        return
 
     prompt = f"{PROMPT_SISTEMA}\n\nCASO: {sintomas if sintomas.strip() else 'Ver imagen adjunta'}"
 
@@ -88,73 +120,75 @@ def generar_pdf(respuesta, sintomas):
     pdf.add_page()
     pdf.set_margins(20, 20, 20)
 
-    # Encabezado
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, "Reporte de Orientacion Clinica", ln=True, align="C")
+    pdf.cell(0, 10, "Reporte de Orientacion Clinica — VeredAI", ln=True, align="C")
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 6, f"Fecha: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True, align="C")
-    pdf.cell(0, 6, "Asistente Medico Rural - Powered by Gemma 4 (Offline)", ln=True, align="C")
+    pdf.cell(0, 6, "VeredAI — Powered by Gemma 4 (Offline) — Solo orientacion de apoyo", ln=True, align="C")
     pdf.ln(5)
 
-    # Línea separadora
     pdf.set_draw_color(100, 100, 100)
     pdf.line(20, pdf.get_y(), 190, pdf.get_y())
     pdf.ln(5)
 
-    # Síntomas descritos
     pdf.set_font("Helvetica", "B", 12)
     pdf.cell(0, 8, "Descripcion del caso:", ln=True)
     pdf.set_font("Helvetica", "", 11)
     pdf.multi_cell(0, 6, sintomas if sintomas.strip() else "Consulta por imagen")
     pdf.ln(4)
 
-    # Orientación clínica
     pdf.set_font("Helvetica", "B", 12)
     pdf.cell(0, 8, "Orientacion clinica:", ln=True)
     pdf.set_font("Helvetica", "", 11)
-    
-    # Limpiar texto para PDF (quitar caracteres especiales)
     texto_limpio = respuesta.encode('latin-1', 'replace').decode('latin-1')
     pdf.multi_cell(0, 6, texto_limpio)
     pdf.ln(4)
 
-    # Aviso legal
     pdf.set_font("Helvetica", "I", 9)
     pdf.set_text_color(120, 120, 120)
     pdf.line(20, pdf.get_y(), 190, pdf.get_y())
     pdf.ln(3)
-    pdf.multi_cell(0, 5, "AVISO: Este reporte es una orientacion de apoyo generada por IA. No reemplaza el juicio clinico del profesional de salud. Siempre use su criterio medico para la toma de decisiones.")
+    pdf.multi_cell(0, 5, "AVISO: Este reporte es orientacion de apoyo generada por IA. No reemplaza el juicio clinico del profesional de salud.")
 
-    # Guardar
     ruta = os.path.join("C:\\MedicoRural", "reporte_medico.pdf")
     pdf.output(ruta)
     return ruta
 
 # ─── Interfaz Gradio ─────────────────────────────────────────
-with gr.Blocks(title="Asistente Médico Rural", theme=gr.themes.Soft()) as app:
-    
+with gr.Blocks(title="VeredAI") as app:
+
     gr.Markdown("""
-    # 🏥 Asistente Médico Rural
+    # ✚ VeredAI
     ### Orientación clínica offline para zonas rurales de Colombia
     *Powered by Gemma 4 · 100% sin internet · Solo apoyo al profesional de salud*
     """)
 
     with gr.Row():
         with gr.Column(scale=1):
-            imagen = gr.Image(label="📷 Imagen médica (opcional)", type="numpy", height=250)
-            sintomas = gr.Textbox(
-                label="📝 Describe los síntomas del paciente",
-                placeholder="Ej: Paciente masculino 45 años, fiebre de 3 días, tos seca, dolor en pecho al respirar...",
-                lines=6
+            imagen = gr.Image(label="📷 Imagen médica (opcional)", type="numpy", height=220)
+            
+            audio_input = gr.Audio(
+            label="🎤 Grabación de voz",
+            sources=["microphone"],
+            type="numpy"
             )
+            
+            btn_transcribir = gr.Button("📝 Transcribir audio a texto", variant="secondary")
+            
+            sintomas = gr.Textbox(
+                label="📋 Síntomas del paciente (edita si es necesario)",
+                placeholder="Ej: Paciente masculino 45 años, fiebre de 3 días, tos seca...\nO usa el micrófono arriba 🎤",
+                lines=5
+            )
+            
+            voz_status = gr.Markdown("")
             btn_consultar = gr.Button("🔍 Consultar orientación clínica", variant="primary", size="lg")
 
         with gr.Column(scale=1):
-            respuesta = gr.Textbox(label="📋 Orientación clínica", lines=18, interactive=False)
+            respuesta = gr.Textbox(label="📋 Orientación clínica", lines=20, interactive=False)
             btn_pdf = gr.Button("📄 Exportar reporte PDF", variant="secondary")
             pdf_output = gr.File(label="Reporte generado")
 
-    # Estado interno para pasar síntomas al PDF
     estado_sintomas = gr.State("")
 
     gr.Markdown("""
@@ -163,12 +197,39 @@ with gr.Blocks(title="Asistente Médico Rural", theme=gr.themes.Soft()) as app:
     No reemplaza el juicio del profesional de salud. Ante emergencias, active siempre los protocolos de derivación.
     """)
 
-    # Eventos
+    # ── Eventos ──
+    btn_transcribir.click(
+        fn=lambda: "⏳ Transcribiendo audio...",
+        inputs=[],
+        outputs=[voz_status],
+        show_progress=False
+    ).then(
+        fn=transcribir_audio,
+        inputs=[audio_input],
+        outputs=[sintomas],
+        show_progress=False
+    ).then(
+        fn=lambda: "✅ Transcripción lista — revisa el texto y presiona Consultar",
+        inputs=[],
+        outputs=[voz_status],
+        show_progress=False
+    )
+
     btn_consultar.click(
-    fn=consultar,
-    inputs=[sintomas, imagen],
-    outputs=[respuesta, estado_sintomas],
-    show_progress=False
+        fn=lambda: "⏳ Analizando con Gemma 4...",
+        inputs=[],
+        outputs=[voz_status],
+        show_progress=False
+    ).then(
+        fn=consultar,
+        inputs=[sintomas, imagen],
+        outputs=[respuesta, estado_sintomas],
+        show_progress=False
+    ).then(
+        fn=lambda: "✅ Análisis completado",
+        inputs=[],
+        outputs=[voz_status],
+        show_progress=False
     )
 
     btn_pdf.click(
@@ -178,6 +239,6 @@ with gr.Blocks(title="Asistente Médico Rural", theme=gr.themes.Soft()) as app:
     )
 
 if __name__ == "__main__":
-    print("🏥 Iniciando Asistente Médico Rural...")
+    print("✚ Iniciando VeredAI...")
     print("📡 Abre tu navegador en: http://localhost:7860")
     app.launch(server_name="0.0.0.0", server_port=7860, share=False)
